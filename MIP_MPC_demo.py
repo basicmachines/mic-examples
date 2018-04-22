@@ -4,6 +4,10 @@ import matplotlib.pyplot as plt
 from gekko import GEKKO
 from scipy.integrate import odeint
 from matplotlib.gridspec import GridSpec
+from matplotlib import animation
+
+# Use this if using jupyter notebook:
+#from IPython.display import HTML
 
 
 class MobileInvertedPendulum(object):
@@ -189,158 +193,249 @@ class DataRecorder(object):
 
         self.data[:self.current_row].to_csv(filename)
 
-def main():
 
-    # Instantiate model
-    model = MobileInvertedPendulum(t=0.0, step_size=0.035)
+class GEKKO_MPC(GEKKO):
+    """Subclass of GEKKO.  Creates a GEKKO object with all
+    parameters and variables initialized based on model object.
+    """
 
-    # Init solver and set time values
-    m = GEKKO()
+    def __init__(self, model, horizon_steps=10):
 
-    # Time horizon for control
-    horizon_steps = 10
-    m.time = np.linspace(0.0, model.step_size*horizon_steps,
-                         horizon_steps + 1)
+        # Init solver and set time values
+        GEKKO.__init__(self)
 
-    # Get parameters from model
-    Mw = model.constants['Mw']
-    Mr = model.constants['Mr']
+        self.time = np.linspace(0.0, model.step_size*horizon_steps,
+                             horizon_steps + 1)
+
+        # Get parameters from model
+        Mw = model.constants['Mw']
+        Mr = model.constants['Mr']
+        R = model.constants['R']
+        L = model.constants['L']
+        G = model.constants['G']
+        Fw = model.constants['Fw']
+        Fr = model.constants['Fr']
+        Iw = model.constants['Iw']
+        Ir = model.constants['Ir']
+
+        # Get initial values of variables from model
+        θr = model.variables['θr']
+        θr_dot = model.variables['θr_dot']
+        xr = model.variables['xr']
+        xr_dot = model.variables['xr_dot']
+        tau = model.mvs['tau']
+
+        # Setup model parameters
+        self.mw = self.Param(name='mass_wheel', value=Mw)
+        self.mr = self.Param(name='mass_robot', value=Mr)
+        self.L = self.Param(name='length_cm', value=L)
+        self.R = self.Param(name='radius_wheel', value=R)
+        self.g = self.Param(name='gravity', value=G)
+        self.Iw = self.Param(name='Inertia_wheel', value=Iw)
+        self.Ir = self.Param(name='Inertia_robot', value=Ir)
+
+        # State Variables - Wheel angle not controlled but torque of motor
+        self.phi = self.SV(name='angle_wheel')
+        self.phi_d = self.SV(name='angle_wheel_dot', value=0) # TODO: Needs to be set
+        self.phi_dd = self.SV(name='angle_wheel_dotdot', value=0) # TODO: Needs to be set
+        self.theta = self.CV(name='angle_robot', value=θr, lb=-np.pi/4, ub=np.pi/4)   # TODO: Jim's settings
+        self.theta_d = self.SV(name='angle_robot_dot', value=θr_dot)
+        self.theta_dd = self.SV(name='angle_robot_dotdot', value=0)
+        self.xw = self.Var(name='xWheel', value=0)
+
+        # Controlled variables
+        self.xr = self.CV(name='xRobot', value=xr)
+        # self.xr_d = self.CV(name='x_position_wheel_dot', value=xr_dot_init)   # TODO: Jim has no CV for this
+
+        # Manipulated variables
+        self.tau = self.MV(name='torque', value=tau, lb=-1000, ub=1000)
+
+        # Define parameter options
+        self.tau.STATUS = 1
+        self.tau.DCOST = 0
+
+        # add (STATUS=1) setpoint to obj function
+        self.xr.STATUS = 1
+        self.theta.STATUS = 1
+        #self.theta_d.STATUS = 1   # TODO: Jim does not have this
+        #self.xr_d.STATUS = 1      # TODO: Jim does not have this
+
+        # set FSTATUS = 1 to follow measurement
+        self.phi.FSTATUS = 1
+        self.phi_d.FSTATUS = 1
+        self.phi_dd.FSTATUS = 0
+        self.theta.FSTATUS = 1
+        self.theta_d.FSTATUS = 1
+        self.theta_dd.FSTATUS = 0
+
+        # Setpoint trajectory initialization
+        self.xr.TR_INIT = 1    # Setpoint trajectory initialization mode
+                            # TR_INIT = 1 makes the initial conditions equal
+                            # to the current value
+        self.xr.TR_OPEN = 1    # Initial trajectory opening ratio
+        self.xr.TAU = 0.02     # Time constant for controlled variable response
+
+        # Intermediates and equations
+        # TODO: Need to add friction terms before using Fw, Fr.
+        self.Equation(
+            (
+                (self.Iw + (self.mw+self.mr)*self.R**2)*self.phi_dd +
+                self.mr*self.R*self.L*self.cos(self.theta)*self.theta_dd
+            ) == self.mr*self.R*self.L*(self.theta_d**2)*self.sin(self.theta) +
+                 self.tau
+        )
+
+        self.Equation(
+            (
+                (self.mr*self.R*self.L*self.cos(self.theta))*self.phi_dd +
+                (self.Ir + self.mr*self.L**2)*self.theta_dd
+            ) == self.mr*self.g*self.L*self.sin(self.theta) - self.tau
+        )
+
+        self.Equation(self.phi.dt() == self.phi_d)
+        self.Equation(self.phi_d.dt() == self.phi_dd)
+        self.Equation(self.theta.dt() == self.theta_d)
+        self.Equation(self.theta_d.dt() == self.theta_dd)
+
+        # Calculate position of wheel and robot
+        self.Equation(self.xw == self.R*self.phi)
+        self.Equation(self.xr == self.xw + L*self.sin(self.theta))
+
+        # Constraints
+        #self.theta.LOWER = -0.5*np.pi   # TODO: Limit the angle to +/- 90 deg
+        #self.theta.UPPER = 0.5*np.pi
+
+        # Solver options
+        self.options.SOLVER = 3
+        self.options.CV_TYPE = 1  # 1 for linear error model
+        self.options.IMODE = 6
+        #self.options.CV_WGT_SLOPE = 0.75
+        # TODO: Consider this or maybe CV_WGT_START
+
+
+def create_animation(model, data_recorder):
+    '''Creates a matplotlib animation of the simulation that
+    can be viewed in a Jupyert Notebook.
+
+    For more info see:
+        http://tiao.io/posts/notebooks/embedding-matplotlib-
+                         animations-in-jupyter-notebooks/
+
+    To display the animation use:
+
+    >>> HTML(anim.to_html5_video())
+
+    This takes several seconds (about 7) to render.
+
+    If you encouter 'RuntimeError: No MovieWriters available!',
+    try the following:
+
+    $ conda install -c conda-forge ffmpeg
+
+    For more information see:
+    see https://stackoverflow.com/a/44483126/101252
+    '''
+
+    # First calculate x, y coordinates for the robot at
+    # all timesteps
+
+    # Wheel's x-position based on angle of wheel.
     R = model.constants['R']
     L = model.constants['L']
-    G = model.constants['G']
-    Fw = model.constants['Fw']
-    Fr = model.constants['Fr']
-    Iw = model.constants['Iw']
-    Ir = model.constants['Ir']
+    θr = data_recorder.data['θr']
+    θw = data_recorder.data['θw']
+    xw = R*θw
 
-    # Get initial values of variables from model
-    θr = model.variables['θr']
-    θr_dot = model.variables['θr_dot']
-    xr = model.variables['xr']
-    xr_dot = model.variables['xr_dot']
-    tau = model.mvs['tau']
+    #import pdb; pdb.set_trace()
 
-    # Setup model
-    # Parameters
-    m.mw = m.Param(name='mass_wheel', value=Mw)
-    m.mr = m.Param(name='mass_robot', value=Mr)
-    m.l = m.Param(name='length_cm', value=L)
-    m.R = m.Param(name='radius_wheel', value=R)
-    m.g = m.Param(name='gravity', value=G)
-    m.Iw = m.Param(name='Inertia_wheel', value=Iw)
-    m.Ir = m.Param(name='Inertia_robot', value=Ir)
+    # TODO: This raises AttributeError: 'float' object has no attribute 'sin'
+    xr = xw + L*np.sin(θr)
 
-    # State Variables - Wheel angle not controlled but torque of motor
-    m.phi = m.SV(name='angle_wheel')
-    m.phi_d = m.SV(name='angle_wheel_dot', value=0) # TODO: Needs to be set
-    m.phi_dd = m.SV(name='angle_wheel_dotdot', value=0) # TODO: Needs to be set
-    m.theta = m.CV(name='angle_robot', value=θr, lb=-np.pi/4, ub=np.pi/4)   # TODO: Jim's settings
-    m.theta_d = m.SV(name='angle_robot_dot', value=θr_dot)
-    m.theta_dd = m.SV(name='angle_robot_dotdot', value=0)
-    m.xw = m.Var(name='xWheel', value=0)
+    # Calculate robot body position
+    yr = L*np.cos(θr)
 
-    # Controlled variables
-    m.xr = m.CV(name='xRobot', value=xr)
-    # m.xr_d = m.CV(name='x_position_wheel_dot', value=xr_dot_init)   # TODO: Jim has no CV for this
+    xMin = np.min([np.min(xr), np.min(xw)])
+    xMax = np.max([(np.max(xr), np.max(xw))])
+    print(xMin, xMax)
 
-    # Manipulated variables
-    m.tau = m.MV(name='torque', value=tau, lb=-1000, ub=1000)
+    # First set up the figure, the axis, and the plot element we want to animate
+    fig, axis = plt.subplots(figsize=(4, 4))
 
-    # Define parameter options
-    m.tau.STATUS = 1
-    m.tau.DCOST = 0
+    axis.set_xlim(-L*1.1, L*1.1)
+    axis.set_ylim(-L*1.1, L*1.1)
 
-    # add (STATUS=1) setpoint to obj function
-    m.xr.STATUS = 1
-    m.theta.STATUS = 1
-    #m.theta_d.STATUS = 1   # TODO: Jim does not have this
-    #m.xr_d.STATUS = 1      # TODO: Jim does not have this
+    # draw some ghost dots at each position. Don't join the dots with a line.
+    axis.plot(xr ,yr, 'o', color='gray', markersize=1)
 
+    axis.plot([-6*1.1, 6*1.1], [0, 0], '--', lw=1, color='black')
+    time_text  = axis.text(0.04, 0.05, '0.0', transform=axis.transAxes)
+    time_text.set_text('t = %.1fs' % t[0])
+
+    # draw the pendulum, a line with 2 markers.
+    line, = axis.plot([xw[0], xr[0]], [0, yr[0]], 'o-', lw=3, markersize=4)
+
+    plt.savefig(__file__ + '.png') # Save initial conditions.
+
+    # initialization function: plot the background of each frame
+    def init_func():
+        line.set_data([], [])
+        time_text.set_text('t = %.1fs' % t[0])
+        return (line, time_text)
+
+    # animation function. This is called sequentially
+    def animate_func(i):
+        line.set_data([xw[i], xr[i]], [0, yr[i]])
+        time_text.set_text('t = %.1fs' % t[i])
+        return (line, time_text)
+
+    # Call the animator.
+    fps = 30
+    frameDelay_msec = 10*1000.0/fps # 10x slow motion.
+
+    # blit=True means only re-draw the parts that have changed.
+    return animation.FuncAnimation(fig, animate_func, init_func=init_func,
+                                   frames=len(t), interval=frameDelay_msec,
+                                   blit=True)
+
+
+def main():
+
+    # Instantiate dynamic model
+    model = MobileInvertedPendulum(t=0.0, step_size=0.035)
+
+    # Time horizon for predictive control
+    horizon_steps = 10
+
+    # Initialise solver based on model parameters
+    m = GEKKO_MPC(model, horizon_steps)
+
+    # Convenience function
     def new_setpoint(var, value, weight=None):
         var.SPHI = value
         var.SPLO = value
         if weight is not None:
             var.WSP = weight
 
-    # setpoints for robot angle to 0
-    new_setpoint(m.theta, 0, weight=2)
-    #new_setpoint(m.theta_d, 0, weight=1)       # TODO: Jim does not set this...
-    #new_setpoint(m.theta_dd, 0, weight=10)
-
-    # setpoints for robot position to 0
-    #new_setpoint(m.xr, 0)                  # TODO: Do we need a weight?
-    #new_setpoint(m.xr_d, 0, weight=1)
-    #new_setpoint(m.xr_dd, 0, weight=10)
-
-    # set FSTATUS = 1 to follow measurement
-    m.phi.FSTATUS = 1
-    m.phi_d.FSTATUS = 1
-    m.phi_dd.FSTATUS = 0
-    m.theta.FSTATUS = 1
-    m.theta_d.FSTATUS = 1
-    m.theta_dd.FSTATUS = 0
-
-    # Setpoint trajectory initialization
-    m.xr.TR_INIT = 1    # Setpoint trajectory initialization mode
-                        # TR_INIT = 1 makes the initial conditions equal
-                        # to the current value
-    m.xr.TR_OPEN = 1    # Initial trajectory opening ratio
-    m.xr.TAU = 0.02     # Time constant for controlled variable response
-
-    # Intermediates and equations
-    # TODO: Need to add friction terms before using Fw, Fr.
-    m.Equation(
-        (
-            (m.Iw + (m.mw+m.mr)*m.R**2)*m.phi_dd +
-            m.mr*m.R*m.l*m.cos(m.theta)*m.theta_dd
-        ) == m.mr*m.R*m.l*(m.theta_d**2)*m.sin(m.theta) + m.tau
-    )
-
-    m.Equation(
-        (
-            (m.mr*m.R*m.l*m.cos(m.theta))*m.phi_dd + (m.Ir +
-            m.mr*m.l**2)*m.theta_dd
-        ) == m.mr*m.g*m.l*m.sin(m.theta) - m.tau
-    )
-
-    m.Equation(m.phi.dt() == m.phi_d)
-    m.Equation(m.phi_d.dt() == m.phi_dd)
-    m.Equation(m.theta.dt() == m.theta_d)
-    m.Equation(m.theta_d.dt() == m.theta_dd)
-    m.Equation(m.xw == m.R*m.phi)    # Radius of wheel times rotation speed
-    m.Equation(m.xr == m.xw + L*m.sin(m.theta)) # Position of robot
-
-    # Constraints
-    #m.theta.LOWER = -0.5*np.pi   # TODO: Limit the angle to +/- 90 deg
-    #m.theta.UPPER = 0.5*np.pi
-
-    # Solver options
-    m.options.SOLVER = 3
-    m.options.CV_TYPE = 1  # 1 for linear error model
-    m.options.IMODE = 6
-    #m.options.CV_WGT_SLOPE = 0.75   # TODO: Consider this or CV_WGT_START
-    # m.solve(remote=False)
-
-    # Plot
-    if m.options.APPSTATUS != 1:
-        raise RuntimeError('gekko.solve() error')
-
-    # Initialize data recorder with a column for the set points
-    params = {'xr_sp': 0.0}
+    # Initialize data recorder to save state data to
+    # file with an extra column for the set points
+    params = {'θr_sp': 0.0, 'xr_sp': 0.0}
     data_recorder = DataRecorder(model, n_steps=401, params=params)
 
-    # Record initial state
+    # Record initial state (t=0)
     data_recorder.record_state()
-
-    # Define setpoint signal
-    def xr_sp_f(t):
-        return 0 if t<=0.5 else -0.5 if t<4 \
-               else 0.5 if t<6 else -0.5 if t<8 else 0.5
 
     '''
     Run simulation, looping over all t[].
     unpack the result using transpose operation (.T).
     '''
+
+    # Define setpoint changes for the demo
+    def xr_sp_f(t):
+        return (0 if t <= 0.5
+                else -0.5 if t < 4
+                else 0.5 if t < 6
+                else -0.5 if t < 8
+                else 0.5)
 
     fig = plt.figure(figsize=(14, 9))
     gs = GridSpec(3, 3)
@@ -353,33 +448,47 @@ def main():
     plt.ion()
     plt.show()
 
-    for i in range(0, 401):
+    for i in range(0, 11):
 
-        # Run MPC solver to produce control actions
+        # Desired setpoints for robot angle and xr
+        new_setpoint(m.theta, 0, weight=2)
+        new_setpoint(m.xr, xr_sp_f(model.t), weight=1)
+
+        # Store current setpoint values
+        data_recorder.params['θr_sp'] = m.theta.SPHI
+        data_recorder.params['xr_sp'] = m.xr.SPHI
+
+        # Other setpoint options
+        # TODO: Jim does not set these...
+        #new_setpoint(m.theta_d, 0, weight=1)
+        #new_setpoint(m.theta_dd, 0, weight=10)
+
+        # setpoints for robot position to 0
+        #new_setpoint(m.xr, 0)                  # TODO: Do we need a weight?
+        #new_setpoint(m.xr_d, 0, weight=1)
+        #new_setpoint(m.xr_dd, 0, weight=10)
+
+        # Save current model state to memory
+        data_recorder.record_state()
+
+        # Run MPC solver to predict next control actions
         m.solve(remote=True)
+
+        # Run dynamic model simulation for one time step
+        model.next_state()
 
         # Read next value for manipulated variable
         model.mvs['tau'] = m.tau.NEWVAL
 
-        # Move forward to current timestep in the dynamic
-        # model simulation
-        model.next_state()
-
-        # Adjust setpoints
-        m.xr.SPHI = xr_sp_f(model.t)
-        m.xr.SPLO = xr_sp_f(model.t)
-        data_recorder.params['xr_sp'] = xr_sp_f(model.t)
-
         # Make sure segway has not tipped over!
-        #assert -0.5*np.pi < θr[i+1] < 0.5*np.pi  TODO: Do we need this?
+        #assert -0.5*np.pi < θr[i+1] < 0.5*np.pi
+        # TODO: Do we need this?
 
         # Read in measurements from the system (odeint)
         m.theta.MEAS = model.variables['θr']
         m.theta_d.MEAS = model.variables['θr_dot']
         m.phi.MEAS = model.variables['θw']
         m.phi_d.MEAS = model.variables['θw_dot']
-
-        data_recorder.record_state()
 
         # Plot data from data recorder
         θr = data_recorder.data['θr']
@@ -425,6 +534,7 @@ def main():
                           color='gray', lw=3)
 
         # display force on mass as a horizontal line emanating from the mass m1
+        L = model.constants['L']
         subPlat_anim.plot([xr_sp[i], xr_sp[i]], [0, L], '--', color='red', lw=1)
         subPlat_anim.axis('equal')
         subPlat_anim.text(0.5, 0.05, 'time = %.1fs' % t[i])
@@ -432,83 +542,15 @@ def main():
         ##plt.draw()
         plt.pause(0.02)
 
+    print("Simulation finished. Close plot window to continue.")
+
     plt.ioff()
     plt.show()
 
     data_recorder.save_to_csv("MIP_data.csv")
 
-    # Animation Plot
-    # Effectively loop over all t[] to pre-calculate all x's and y's for the robot.
-
-    # Calculate wheel's x-position based on angle of wheel.
-    xw = R*θw    # TODO: Inform Jim anout the *2 here in his script
-    xr = xw + L*np.sin(θr)
-
-    # Calculate robot body position
-    yr = L*np.cos(θr)
-
-    xMin = np.min([np.min(xr), np.min(xw)])
-    xMax = np.max([(np.max(xr), np.max(xw))])
-    print(xMin, xMax)
-
-    '''
-    Animate the pendulum - Initialization
-    http://tiao.io/posts/notebooks/embedding-matplotlib-animations-in-jupyter-notebooks/
-    '''
-
-    from matplotlib import animation
-    from IPython.display import HTML
-
-    # First set up the figure, the axis, and the plot element we want to animate
-    fig, axis = plt.subplots(figsize=(4, 4))
-
-    axis.set_xlim(-6*1.1, 6*1.1)
-    axis.set_ylim(-6*1.1, 6*1.1)
-
-    # draw some ghost dots at each position. Don't join the dots with a line.
-    axis.plot(xr ,yr, 'o', color='gray', markersize=1)
-
-    axis.plot([-6*1.1, 6*1.1], [0, 0], '--', lw=1, color='black')
-    time_text  = axis.text(0.04, 0.05, '0.0', transform=axis.transAxes)
-    time_text.set_text('t = %.1fs' % t[0])
-
-    # draw the pendulum, a line with 2 markers.
-    line, = axis.plot([xw[0], xr[0]], [0, yr[0]], 'o-', lw=3, markersize=4)
-
-    plt.savefig(__file__ + '.png') # Save initial conditions.
-
-    '''
-    Animate the pendulum.
-    '''
-
-    # initialization function: plot the background of each frame
-    def init_func():
-        line.set_data([], [])
-        time_text.set_text('t = %.1fs' % t[0])
-        return (line, time_text)
-
-    # animation function. This is called sequentially
-    def animate_func(i):
-        line.set_data([xw[i], xr[i]], [0, yr[i]])
-        time_text.set_text('t = %.1fs' % t[i])
-        return (line, time_text)
-
-    # call the animator. blit=True means only re-draw the parts that have
-    # changed.
-    fps = 30
-    frameDelay_msec = 10*1000.0/fps # 10x slow motion.
-
-    anim = animation.FuncAnimation(fig, animate_func, init_func=init_func,
-                                   frames=len(t), interval=frameDelay_msec,
-                                   blit=True)
-
-    '''
-    Display animation. This takes several seconds (about 7) to render.
-    for 'RuntimeError: No MovieWriters available!',
-      do 'conda install -c conda-forge ffmpeg'
-      see https://stackoverflow.com/a/44483126/101252
-    '''
-    HTML(anim.to_html5_video())
+    # Make an animated plot for display in Jupyter Notebook
+    create_animation(model, data_recorder)
 
 
 if __name__ == '__main__':
