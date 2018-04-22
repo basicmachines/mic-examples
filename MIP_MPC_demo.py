@@ -7,7 +7,7 @@ from matplotlib.gridspec import GridSpec
 from matplotlib import animation
 
 # Use this if using jupyter notebook:
-#from IPython.display import HTML
+from IPython.display import HTML
 
 
 class MobileInvertedPendulum(object):
@@ -236,9 +236,13 @@ class GEKKO_MPC(GEKKO):
 
         # State Variables - Wheel angle not controlled but torque of motor
         self.phi = self.SV(name='angle_wheel')
-        self.phi_d = self.SV(name='angle_wheel_dot', value=0) # TODO: Needs to be set
-        self.phi_dd = self.SV(name='angle_wheel_dotdot', value=0) # TODO: Needs to be set
-        self.theta = self.CV(name='angle_robot', value=θr, lb=-np.pi/4, ub=np.pi/4)   # TODO: Jim's settings
+
+        # TODO: Values should be set based on xr_dot
+        self.phi_d = self.SV(name='angle_wheel_dot', value=0)
+        self.phi_dd = self.SV(name='angle_wheel_dotdot', value=0)
+
+        self.theta = self.CV(name='angle_robot', value=θr, lb=-np.pi/4,
+                             ub=np.pi/4)   # TODO: Check Jim's settings
         self.theta_d = self.SV(name='angle_robot_dot', value=θr_dot)
         self.theta_dd = self.SV(name='angle_robot_dotdot', value=0)
         self.xw = self.Var(name='xWheel', value=0)
@@ -313,17 +317,19 @@ class GEKKO_MPC(GEKKO):
         # TODO: Consider this or maybe CV_WGT_START
 
 
-def create_animation(model, data_recorder):
-    '''Creates a matplotlib animation of the simulation that
-    can be viewed in a Jupyert Notebook.
+def create_animation(model, data_recorder, fps=30, figsize=(4, 4),
+                     filename=__file__ + '.png'):
+    '''Creates a matplotlib animation of the simulation
+    and saves it to disk.
+
+    The animation that is returned can also be viewed in
+    a Jupyert Notebook using:
+
+    >>> HTML(anim.to_html5_video())
 
     For more info see:
         http://tiao.io/posts/notebooks/embedding-matplotlib-
                          animations-in-jupyter-notebooks/
-
-    To display the animation use:
-
-    >>> HTML(anim.to_html5_video())
 
     This takes several seconds (about 7) to render.
 
@@ -358,23 +364,25 @@ def create_animation(model, data_recorder):
     xMax = np.max([(np.max(xr), np.max(xw))])
     print(xMin, xMax)
 
-    # First set up the figure, the axis, and the plot element we want to animate
-    fig, axis = plt.subplots(figsize=(4, 4))
+    # First set up the figure, the axis, and the plot element
+    # we want to animate
+    fig, axis = plt.subplots(figsize)
 
     axis.set_xlim(-L*1.1, L*1.1)
     axis.set_ylim(-L*1.1, L*1.1)
 
-    # draw some ghost dots at each position. Don't join the dots with a line.
+    # Draw some ghost dots at each position. Don't join the dots
+    # with a line.
     axis.plot(xr ,yr, 'o', color='gray', markersize=1)
 
-    axis.plot([-6*1.1, 6*1.1], [0, 0], '--', lw=1, color='black')
+    axis.plot([-L*1.1, L*1.1], [0, 0], '--', lw=1, color='black')
     time_text  = axis.text(0.04, 0.05, '0.0', transform=axis.transAxes)
     time_text.set_text('t = %.1fs' % t[0])
 
     # draw the pendulum, a line with 2 markers.
     line, = axis.plot([xw[0], xr[0]], [0, yr[0]], 'o-', lw=3, markersize=4)
 
-    plt.savefig(__file__ + '.png') # Save initial conditions.
+    plt.savefig(filename)
 
     # initialization function: plot the background of each frame
     def init_func():
@@ -389,7 +397,6 @@ def create_animation(model, data_recorder):
         return (line, time_text)
 
     # Call the animator.
-    fps = 30
     frameDelay_msec = 10*1000.0/fps # 10x slow motion.
 
     # blit=True means only re-draw the parts that have changed.
@@ -445,7 +452,7 @@ def main():
     plt.ion()
     plt.show()
 
-    for i in range(0, 401):
+    for i in range(0, 11):
 
         # Desired setpoints for robot angle and xr
         new_setpoint(m.theta, 0, weight=2)
@@ -461,7 +468,7 @@ def main():
         #new_setpoint(m.theta_dd, 0, weight=10)
 
         # setpoints for robot position to 0
-        #new_setpoint(m.xr, 0)                  # TODO: Do we need a weight?
+        #new_setpoint(m.xr, 0)               # Do we need a weight?
         #new_setpoint(m.xr_d, 0, weight=1)
         #new_setpoint(m.xr_dd, 0, weight=10)
 
@@ -547,7 +554,7 @@ def main():
     data_recorder.save_to_csv("MIP_data.csv")
 
     # Make an animated plot for display in Jupyter Notebook
-    create_animation(model, data_recorder)
+    animation = create_animation(model, data_recorder)
 
 
 if __name__ == '__main__':
