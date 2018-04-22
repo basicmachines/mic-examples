@@ -421,9 +421,6 @@ def main():
     params = {'θr_sp': 0.0, 'xr_sp': 0.0}
     data_recorder = DataRecorder(model, n_steps=401, params=params)
 
-    # Record initial state (t=0)
-    data_recorder.record_state()
-
     '''
     Run simulation, looping over all t[].
     unpack the result using transpose operation (.T).
@@ -448,7 +445,7 @@ def main():
     plt.ion()
     plt.show()
 
-    for i in range(0, 11):
+    for i in range(0, 401):
 
         # Desired setpoints for robot angle and xr
         new_setpoint(m.theta, 0, weight=2)
