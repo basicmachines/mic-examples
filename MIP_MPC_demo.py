@@ -10,7 +10,7 @@ from matplotlib import animation
 from IPython.display import HTML
 
 
-defaults = {
+previous_settings = {
     'Mw': 10,    # mass of wheel
     'Mr': 2,     # mass of robot
     'R': 4,      # radius of wheel
@@ -23,7 +23,7 @@ defaults = {
 class MobileInvertedPendulum(object):
 
     # Default constants (for both Odeint and GEKKO)
-    # TODO: Add units
+    # Estimates based on Beagle Bone specifications
     defaults = {
         'Mw': 10,    # mass of wheel
         'Mr': 2,     # mass of robot
@@ -35,7 +35,7 @@ class MobileInvertedPendulum(object):
     }
 
     def __init__(self, name="MIP", constants=None, init_values=None,
-                 t=0.0, step_size=1.0):
+                 t=0.0, step_size=0.1):
 
         if constants:
             self.constants = constants
@@ -145,19 +145,25 @@ class MobileInvertedPendulum(object):
 
         θr, θr_dot, θw, θw_dot = y[1].T
 
+        L = self.constants['L']
+        R = self.constants['R']
+
         self.variables['θr'] = θr
         self.variables['θr_dot'] = θr_dot
         self.variables['θw'] = θw
         self.variables['θw_dot'] = θw_dot
 
         # Calculate wheel's x-position based on angle of wheel.
-        self.variables['xw'] = self.constants['R']*θw
+        self.variables['xw'] = R*θw
+
+        # Calculate robot body's x-position
         self.variables['xr'] = self.variables['xw'] + (
-                               self.constants['L']*np.sin(θr)
+                               L*np.sin(θr)
                                )
+        self.variables['xr_dot'] = R*θw_dot + L*θr_dot
 
         # Calculate robot body position
-        self.variables['yr'] = self.constants['L']*np.cos(θr)
+        self.variables['yr'] = L*np.cos(θr)
 
         self.t += self.step_size
 
@@ -260,7 +266,8 @@ class GEKKO_MPC(GEKKO):
 
         # Controlled variables
         self.xr = self.CV(name='xRobot', value=xr)
-        # self.xr_d = self.CV(name='x_position_wheel_dot', value=xr_dot_init)   # TODO: Jim has no CV for this
+        # TODO: Jim has no CV for this
+        # self.xr_d = self.CV(name='x_position_wheel_dot', value=xr_dot_init)
 
         # Manipulated variables
         self.tau = self.MV(name='torque', value=tau, lb=-1000, ub=1000)
@@ -284,11 +291,14 @@ class GEKKO_MPC(GEKKO):
         self.theta_dd.FSTATUS = 0
 
         # Setpoint trajectory initialization
-        self.xr.TR_INIT = 1    # Setpoint trajectory initialization mode
-                            # TR_INIT = 1 makes the initial conditions equal
-                            # to the current value
-        self.xr.TR_OPEN = 1    # Initial trajectory opening ratio
+        self.xr.TR_INIT = 2    # Setpoint trajectory initialization mode
+                               # TR_INIT = 1 makes the initial conditions equal
+                               # to the current value
+        self.xr.TR_OPEN = 5    # Trajectory funnel opening ratio
         self.xr.TAU = 0.02     # Time constant for controlled variable response
+        self.theta.TR_INIT = 2
+        self.theta.TR_OPEN = 5
+        self.theta.TAU = 0.02
 
         # Intermediates and equations
         # TODO: Need to add friction terms before using Fw, Fr.
@@ -319,6 +329,9 @@ class GEKKO_MPC(GEKKO):
         # Constraints
         #self.theta.LOWER = -0.5*np.pi   # TODO: Limit the angle to +/- 90 deg
         #self.theta.UPPER = 0.5*np.pi
+
+        # Adjustments to objective function
+        self.Obj(1.0e-6*self.tau**2)  # Penalize unnecessary movements
 
         # Solver options
         self.options.SOLVER = 3
@@ -430,15 +443,16 @@ def main():
     m = GEKKO_MPC(model, horizon_steps)
 
     # Convenience function
-    def new_setpoint(var, value, weight=None):
-        var.SPHI = value
-        var.SPLO = value
+    def new_setpoint(var, value, weight=None, tol=0.01):
+        var.SPHI = value*(1 + tol)
+        var.SPLO = value*(1 - tol)
         if weight is not None:
-            var.WSP = weight
+            var.WSPHI = weight
+            var.WSPLO = weight
 
     # Initialize data recorder to save state data to
     # file with an extra column for the set points
-    params = {'θr_sp': 0.0, 'xr_sp': 0.0}
+    params = {'θr_sp': 0.0, 'xr_sp': 0.0, 'tau_p1': model.mvs['tau']}
     data_recorder = DataRecorder(model, n_steps=401, params=params)
 
     '''
@@ -454,26 +468,38 @@ def main():
                 else -0.5 if t < 8
                 else 0.5)
 
-    def random_setpoint_generator(mu=0.0, sigma=0.5, n=10):
-        while True:
+    def random_setpoint_generator(mu=0.0, sigma=0.5, n=10, init=None):
+
+        if init is not None:
+            current_value = init
+        else:
             current_value = np.random.normal(mu, sigma)
+
+        while True:
             for i in range(np.random.poisson(n)):
                 yield current_value
+            current_value = np.random.normal(mu, sigma)
 
-    xr_sp_random = random_setpoint_generator(mu=0.0, sigma=0.25, n=40)
+    xr_sp_random = random_setpoint_generator(mu=0.0, sigma=0.25, n=40,
+                                             init=0.0)
 
     fig = plt.figure(figsize=(14, 9))
     gs = GridSpec(3, 3)
 
-    subPlot_a = plt.subplot(gs[0,0])
-    subPlot_u = plt.subplot(gs[1,0])
-    subPlot_y = plt.subplot(gs[2,0])
-    subPlat_anim = plt.subplot(gs[:,1:])
+    ax_a = plt.subplot(gs[0, 0])
+    ax_u = plt.subplot(gs[1, 0])
+    ax_y = plt.subplot(gs[2, 0])
+    ax_anim = plt.subplot(gs[:,1:])
 
     plt.ion()
     plt.show()
 
     for i in range(0, 401):
+
+        # TODO: Remove this when the problem of TR_INIT is fixed
+        if i == 1:
+            m.theta.TR_INIT = 1
+            m.xr.TR_INIT = 1
 
         # Desired setpoints for robot angle and xr
         new_setpoint(m.theta, 0, weight=2)
@@ -494,17 +520,20 @@ def main():
         #new_setpoint(m.xr_d, 0, weight=1)
         #new_setpoint(m.xr_dd, 0, weight=10)
 
-        # Save current model state to memory
-        data_recorder.record_state()
-
         # Run MPC solver to predict next control actions
         m.solve(remote=True)
 
-        # Run dynamic model simulation for one time step
-        model.next_state()
+        #import pdb; pdb.set_trace()
 
         # Read next value for manipulated variable
+        data_recorder.params['tau_p1'] = m.tau.NEWVAL
+
+        # Save current model state to memory
+        data_recorder.record_state()
+
+        # Update dynamic model and simulate next time step
         model.mvs['tau'] = m.tau.NEWVAL
+        model.next_state()
 
         # Make sure segway has not tipped over!
         #assert -0.5*np.pi < θr[i+1] < 0.5*np.pi
@@ -526,60 +555,64 @@ def main():
         yr = data_recorder.data['yr']
         xr_sp = data_recorder.data['xr_sp']
 
-        subPlot_a.cla()
-        subPlot_a.grid()
-        subPlot_a.plot(t[0:i],θr[0:i],'b--', linewidth=2, label='rad Robot')
-        subPlot_a.plot(t[0:i],θw[0:i],'k--', linewidth=2, label='rad Wheel')
-        subPlot_a.legend(loc='best')
-        subPlot_a.set_ylabel('Angles [rad]')
+        ax_a.cla()
+        ax_a.grid()
+        ax_a.plot(t[0:i], θr[0:i], 'b--', linewidth=2, label='rad Robot')
+        ax_a.plot(t[0:i], θw[0:i], 'k--', linewidth=2, label='rad Wheel')
+        ax_a.legend(loc='best')
+        ax_a.set_ylabel('Angles (rad)')
 
-        subPlot_u.cla()
-        subPlot_u.grid()
-        subPlot_u.plot(t[0:i], tau[0:i], '-', color='Black', label='u')
-        subPlot_u.set_ylabel('Torque')
-        subPlot_u.legend(loc='best')
-        subPlot_u.set_xlabel('Time')
+        ax_u.cla()
+        ax_u.grid()
+        ax_u.plot(t[0:i], tau[0:i], '-', color='Black', label='u')
+        ax_u.set_ylabel('Torque (N.m^2)')
+        ax_u.legend(loc='best')
 
-        subPlot_y.cla()
-        subPlot_y.grid()
-        subPlot_y.plot(t[0:i], xw[0:i], '-',color='black', label='xw')
-        subPlot_y.plot(t[0:i], xr_sp[0:i], '--',color='red', lw=1, label='SP')
-        subPlot_y.plot(t[0:i], xr[0:i], '-',color='blue', label='xr')
-        subPlot_y.legend(loc='best')
-        subPlot_y.set_ylabel('x, position')
+        ax_y.cla()
+        ax_y.grid()
+        ax_y.plot(t[0:i], xw[0:i], '-', color='black', label='xw')
+        ax_y.plot(t[0:i], xr_sp[0:i], '--', color='red', lw=1, label='SP')
+        ax_y.plot(t[0:i], xr[0:i], '-', color='blue', label='xr')
+        ax_y.legend(loc='best')
+        ax_y.set_xlabel('Time (s)')
+        ax_y.set_ylabel('x position (cm)')
 
-        subPlat_anim.cla()
+        ax_anim.cla()
 
-        subPlat_anim.plot([xw[i], xr[i]], [0, yr[i]], 'o-', color='blue',
-                          linewidth=3, markersize=6, markeredgecolor='blue',
-                          markerfacecolor='blue')
-        subPlat_anim.plot([-4, 4], [0, 0], 'k--', linewidth=1)
+        ax_anim.plot([xw[i], xr[i]], [0, yr[i]], 'o-', color='blue',
+                     linewidth=3, markersize=6, markeredgecolor='blue',
+                     markerfacecolor='blue')
+        ax_anim.plot([-4, 4], [0, 0], 'k--', linewidth=1)
 
         # display force on mass as a grey line
         # TODO: Try an arrow:
         #xs = [xw[i], xw[i] - tau[i]*3/1000.0]
         #xs if tau[i] < 0 else sorted(xs)
         #pyplot.arrow(x, y, dx, dy, hold=None, **kwargs)
-        subPlat_anim.plot([xw[i], xw[i] - tau[i]*3/1000.0], [0, 0], '-',
-                          color='gray', lw=3)
+        ax_anim.plot([xw[i], xw[i] - tau[i]*3/1000.0], [0, 0], '-',
+                     color='gray', lw=3)
 
         # display body of pendulum
         L = model.constants['L']
-        subPlat_anim.plot([xr_sp[i], xr_sp[i]], [0, L], '--', color='red', lw=1)
-        subPlat_anim.axis('equal')
-        subPlat_anim.text(0.5, 0.05, 'time = %.1fs' % t[i])
+        ax_anim.plot([xr_sp[i], xr_sp[i]], [0, L], '--', color='red', lw=1)
+        ax_anim.axis('equal')
+        ax_anim.text(0.5, 0.05, 'time = %.2fs' % t[i])
 
         #plt.draw()
         plt.pause(0.02)
 
     time_elapsed = (pd.datetime.now() - start_time).seconds
+    time_stamp = start_time.strftime("%y%m%d%H%M")
 
-    filename = 'MIP_MPC_data ' + start_time.strftime("%y%m%d%H%M") + '.csv'
+    filename = 'MIP_MPC_data ' + time_stamp + '.csv'
     data_recorder.save_to_csv(filename)
 
     print("\nSimulation finished after %d hours, %d minutes." %
           (time_elapsed // 3600, time_elapsed // 60)
     )
+
+    filename = 'MIP_MPC_plot ' + time_stamp + '.pdf'
+    plt.savefig(filename)
 
     print("Close plot window to continue.")
 
@@ -587,7 +620,8 @@ def main():
     plt.show()
 
     # Make an animated plot for display in Jupyter Notebook
-    animation = create_animation(model, data_recorder)
+    # TODO: This needs adjusting to new dimensions
+    #animation = create_animation(model, data_recorder)
 
 
 if __name__ == '__main__':
