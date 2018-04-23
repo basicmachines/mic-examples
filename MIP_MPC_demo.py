@@ -10,6 +10,16 @@ from matplotlib import animation
 from IPython.display import HTML
 
 
+defaults = {
+    'Mw': 10,    # mass of wheel
+    'Mr': 2,     # mass of robot
+    'R': 4,      # radius of wheel
+    'L': 6,      # length from end to center of mass of the rod
+    'G': 9.81,   # gravity (9.81 m/s)
+    'Fw': 0.0,   # Friction, wheel, opposing θw_dot
+    'Fr': 0.0    # Friction, robot, opposing θr_dot
+}
+
 class MobileInvertedPendulum(object):
 
     # Default constants (for both Odeint and GEKKO)
@@ -169,7 +179,8 @@ class DataRecorder(object):
                        list(model.mvs.keys()) + \
                        list(self.params.keys())
 
-        self.data = pd.DataFrame(index=range(n_steps), columns=self.columns)
+        self.data = pd.DataFrame(index=range(n_steps), columns=self.columns,
+                                 dtype=float)
         self.current_row = 0
 
     def record_state(self):
@@ -352,21 +363,21 @@ def create_animation(model, data_recorder, fps=30, figsize=(4, 4),
     θw = data_recorder.data['θw']
     xw = R*θw
 
-    #import pdb; pdb.set_trace()
-
-    # TODO: This raises AttributeError: 'float' object has no attribute 'sin'
+    # Calculate wheel x-position
     xr = xw + L*np.sin(θr)
 
-    # Calculate robot body position
+    # Calculate robot body x-position
     yr = L*np.cos(θr)
+
+    t = data_recorder.data['t']
 
     xMin = np.min([np.min(xr), np.min(xw)])
     xMax = np.max([(np.max(xr), np.max(xw))])
-    print(xMin, xMax)
+    #print(xMin, xMax)
 
     # First set up the figure, the axis, and the plot element
     # we want to animate
-    fig, axis = plt.subplots(figsize)
+    fig, axis = plt.subplots(figsize=figsize)
 
     axis.set_xlim(-L*1.1, L*1.1)
     axis.set_ylim(-L*1.1, L*1.1)
@@ -407,6 +418,8 @@ def create_animation(model, data_recorder, fps=30, figsize=(4, 4),
 
 def main():
 
+    start_time = pd.datetime.now()
+
     # Instantiate dynamic model
     model = MobileInvertedPendulum(t=0.0, step_size=0.035)
 
@@ -441,6 +454,14 @@ def main():
                 else -0.5 if t < 8
                 else 0.5)
 
+    def random_setpoint_generator(mu=0.0, sigma=0.5, n=10):
+        while True:
+            current_value = np.random.normal(mu, sigma)
+            for i in range(np.random.poisson(n)):
+                yield current_value
+
+    xr_sp_random = random_setpoint_generator(mu=0.0, sigma=0.25, n=40)
+
     fig = plt.figure(figsize=(14, 9))
     gs = GridSpec(3, 3)
 
@@ -452,11 +473,12 @@ def main():
     plt.ion()
     plt.show()
 
-    for i in range(0, 11):
+    for i in range(0, 401):
 
         # Desired setpoints for robot angle and xr
         new_setpoint(m.theta, 0, weight=2)
-        new_setpoint(m.xr, xr_sp_f(model.t), weight=1)
+        #new_setpoint(m.xr, xr_sp_f(model.t), weight=1)
+        new_setpoint(m.xr, next(xr_sp_random), weight=1)
 
         # Store current setpoint values
         data_recorder.params['θr_sp'] = m.theta.SPHI
@@ -520,9 +542,9 @@ def main():
 
         subPlot_y.cla()
         subPlot_y.grid()
-        subPlot_y.plot(t[0:i], xr[0:i], '-',color='blue', label='xr')
         subPlot_y.plot(t[0:i], xw[0:i], '-',color='black', label='xw')
-        subPlot_y.plot(t[0:i], xr_sp[0:i], '-',color='red', label='SP')
+        subPlot_y.plot(t[0:i], xr_sp[0:i], '--',color='red', lw=1, label='SP')
+        subPlot_y.plot(t[0:i], xr[0:i], '-',color='blue', label='xr')
         subPlot_y.legend(loc='best')
         subPlot_y.set_ylabel('x, position')
 
@@ -533,25 +555,36 @@ def main():
                           markerfacecolor='blue')
         subPlat_anim.plot([-4, 4], [0, 0], 'k--', linewidth=1)
 
-        # display force on mass as a horizontal line emanating from the mass m1
+        # display force on mass as a grey line
+        # TODO: Try an arrow:
+        #xs = [xw[i], xw[i] - tau[i]*3/1000.0]
+        #xs if tau[i] < 0 else sorted(xs)
+        #pyplot.arrow(x, y, dx, dy, hold=None, **kwargs)
         subPlat_anim.plot([xw[i], xw[i] - tau[i]*3/1000.0], [0, 0], '-',
                           color='gray', lw=3)
 
-        # display force on mass as a horizontal line emanating from the mass m1
+        # display body of pendulum
         L = model.constants['L']
         subPlat_anim.plot([xr_sp[i], xr_sp[i]], [0, L], '--', color='red', lw=1)
         subPlat_anim.axis('equal')
         subPlat_anim.text(0.5, 0.05, 'time = %.1fs' % t[i])
 
-        ##plt.draw()
+        #plt.draw()
         plt.pause(0.02)
 
-    print("Simulation finished. Close plot window to continue.")
+    time_elapsed = (pd.datetime.now() - start_time).seconds
+
+    filename = 'MIP_MPC_data ' + start_time.strftime("%y%m%d%H%M") + '.csv'
+    data_recorder.save_to_csv(filename)
+
+    print("\nSimulation finished after %d hours, %d minutes." %
+          (time_elapsed // 3600, time_elapsed // 60)
+    )
+
+    print("Close plot window to continue.")
 
     plt.ioff()
     plt.show()
-
-    data_recorder.save_to_csv("MIP_data.csv")
 
     # Make an animated plot for display in Jupyter Notebook
     animation = create_animation(model, data_recorder)
