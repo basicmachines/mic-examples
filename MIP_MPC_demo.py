@@ -5,6 +5,7 @@ from gekko import GEKKO
 from scipy.integrate import odeint
 from matplotlib.gridspec import GridSpec
 from matplotlib import animation
+import timeit
 
 # Use this if using jupyter notebook:
 from IPython.display import HTML
@@ -433,8 +434,13 @@ def main():
 
     start_time = pd.datetime.now()
 
+    solver_times = []
+
     # Instantiate dynamic model
     model = MobileInvertedPendulum(t=0.0, step_size=0.035)
+
+    # Choose length of simulation (timesteps)
+    n_steps = 400
 
     # Time horizon for predictive control
     horizon_steps = 10
@@ -480,8 +486,9 @@ def main():
                 yield current_value
             current_value = np.random.normal(mu, sigma)
 
-    xr_sp_random = random_setpoint_generator(mu=0.0, sigma=0.25, n=40,
-                                             init=0.0)
+    # Initialize random_setpoint_generator
+    # Set init=0.0 to make it start at 0
+    xr_sp_random = random_setpoint_generator(mu=0.0, sigma=0.25, n=40)
 
     fig = plt.figure(figsize=(14, 9))
     gs = GridSpec(3, 3)
@@ -494,7 +501,7 @@ def main():
     plt.ion()
     plt.show()
 
-    for i in range(0, 401):
+    for i in range(0, n_steps + 1):
 
         # TODO: Remove this when the problem of TR_INIT is fixed
         if i == 1:
@@ -521,7 +528,10 @@ def main():
         #new_setpoint(m.xr_dd, 0, weight=10)
 
         # Run MPC solver to predict next control actions
+        timer1 = timeit.default_timer()
         m.solve(remote=True)
+        timer2 = timeit.default_timer()
+        solver_times.append(timer2 - timer1)
 
         #import pdb; pdb.set_trace()
 
@@ -613,6 +623,17 @@ def main():
 
     filename = 'MIP_MPC_plot ' + time_stamp + '.pdf'
     plt.savefig(filename)
+
+    print("Average duration of each iteration: "
+          "{:6.0f}ms".format(time_elapsed*1000/n_steps))
+
+    tmin, tmax, tmean = (min(solver_times), max(solver_times),
+                         sum(solver_times)/len(solver_times))
+
+    print("APMonitor solver speed (milliseconds):\n"
+          "Fastest: {:6.0f}ms\n"
+          "Slowest: {:6.0f}ms\n"
+          "   Mean: {:6.0f}ms\n".format(tmin*1000, tmax*1000, tmean*1000))
 
     print("Close plot window to continue.")
 
