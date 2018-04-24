@@ -453,10 +453,10 @@ def main():
     model = MobileInvertedPendulum(t=0.0, step_size=0.035)
 
     # Choose length of simulation (timesteps)
-    n_steps = 10
+    n_steps = 401
 
     # Time horizon for predictive control
-    horizon_steps = 400
+    horizon_steps = 10
 
     # Initialise solver based on model parameters
     m = GEKKO_MPC(model, horizon_steps)
@@ -473,7 +473,7 @@ def main():
     # file with an extra column for the set points
     params = {'xr_sp': 0.0, 'θr_sp': 0.0, 'tau_p1': model.mvs['tau'],
               'tau_p1_nn': model.mvs['tau']}
-    data_recorder = DataRecorder(model, n_steps=401, params=params)
+    data_recorder = DataRecorder(model, n_steps=n_steps, params=params)
 
     '''
     Run simulation, looping over all t[].
