@@ -456,7 +456,7 @@ def main():
     n_steps = 10
 
     # Time horizon for predictive control
-    horizon_steps = 10
+    horizon_steps = 400
 
     # Initialise solver based on model parameters
     m = GEKKO_MPC(model, horizon_steps)
