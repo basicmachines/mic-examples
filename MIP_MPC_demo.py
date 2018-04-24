@@ -1,7 +1,8 @@
+from gekko import GEKKO
+import nn_predict
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from gekko import GEKKO
 from scipy.integrate import odeint
 from matplotlib.gridspec import GridSpec
 from matplotlib import animation
@@ -182,22 +183,34 @@ class DataRecorder(object):
         self.n_steps = n_steps
         self.filename = filename
 
-        self.columns = ['t'] + list(model.variables.keys()) + \
-                       list(model.mvs.keys()) + \
-                       list(self.params.keys())
+        self.columns = ['t'] + \
+                       sorted(list(model.variables.keys())) + \
+                       sorted(list(model.mvs.keys())) + \
+                       sorted(list(self.params.keys()))
 
         self.data = pd.DataFrame(index=range(n_steps), columns=self.columns,
                                  dtype=float)
         self.current_row = 0
 
+    def merge_dicts(self, list_of_dicts):
+        """Merges the dictionaries into one."""
+
+        new_dict = list_of_dicts[0].copy()
+        for e in list_of_dicts[1:]:
+            new_dict.update(e)
+
+        return new_dict
+
     def record_state(self):
 
-        self.data.iloc[self.current_row,:] = (
-            [self.model.t] +
-            list(self.model.variables.values()) +
-            list(self.model.mvs.values()) +
-            list(self.params.values())
-        ) # TODO: It would be safer to check the keys haven't changed
+        self.data.iloc[self.current_row, :] = self.merge_dicts(
+            [
+                {'t': self.model.t},
+                self.model.variables,
+                self.model.mvs,
+                self.params
+            ]
+        ) # TODO: Is there an easier way to do this?
 
         self.current_row += 1
 
@@ -440,7 +453,7 @@ def main():
     model = MobileInvertedPendulum(t=0.0, step_size=0.035)
 
     # Choose length of simulation (timesteps)
-    n_steps = 400
+    n_steps = 10
 
     # Time horizon for predictive control
     horizon_steps = 10
@@ -458,7 +471,8 @@ def main():
 
     # Initialize data recorder to save state data to
     # file with an extra column for the set points
-    params = {'θr_sp': 0.0, 'xr_sp': 0.0, 'tau_p1': model.mvs['tau']}
+    params = {'xr_sp': 0.0, 'θr_sp': 0.0, 'tau_p1': model.mvs['tau'],
+              'tau_p1_nn': model.mvs['tau']}
     data_recorder = DataRecorder(model, n_steps=401, params=params)
 
     '''
@@ -474,7 +488,7 @@ def main():
                 else -0.5 if t < 8
                 else 0.5)
 
-    def random_setpoint_generator(mu=0.0, sigma=0.5, n=10, init=None):
+    def random_setpoint_generator(mu=0.0, sigma=0.5, n=40, init=None):
 
         if init is not None:
             current_value = init
@@ -488,7 +502,7 @@ def main():
 
     # Initialize random_setpoint_generator
     # Set init=0.0 to make it start at 0
-    xr_sp_random = random_setpoint_generator(mu=0.0, sigma=0.25, n=40)
+    xr_sp_random = random_setpoint_generator(mu=0.0, sigma=0.35, n=30)
 
     fig = plt.figure(figsize=(14, 9))
     gs = GridSpec(3, 3)
@@ -509,13 +523,14 @@ def main():
             m.xr.TR_INIT = 1
 
         # Desired setpoints for robot angle and xr
-        new_setpoint(m.theta, 0, weight=2)
-        #new_setpoint(m.xr, xr_sp_f(model.t), weight=1)
-        new_setpoint(m.xr, next(xr_sp_random), weight=1)
+        theta_sp, xr_sp = 0.0, next(xr_sp_random)
+
+        new_setpoint(m.theta, theta_sp, weight=2)
+        new_setpoint(m.xr, xr_sp, weight=1)
 
         # Store current setpoint values
-        data_recorder.params['θr_sp'] = m.theta.SPHI
-        data_recorder.params['xr_sp'] = m.xr.SPHI
+        data_recorder.params['θr_sp'] = theta_sp
+        data_recorder.params['xr_sp'] = xr_sp
 
         # Other setpoint options
         # TODO: Jim does not set these...
@@ -529,20 +544,32 @@ def main():
 
         # Run MPC solver to predict next control actions
         timer1 = timeit.default_timer()
+
         m.solve(remote=True)
+        tau_p1 = m.tau.NEWVAL
+
+        # Or use trained neural network instead
+        tau_p1_nn = nn_predict.next_tau(
+            tau=model.mvs['tau'],
+            θw=model.variables['θw'],
+            θw_dot=model.variables['θw_dot'],
+            θr=model.variables['θr'],
+            θr_dot=model.variables['θr_dot'],
+            xr_sp=xr_sp
+        )
+
         timer2 = timeit.default_timer()
         solver_times.append(timer2 - timer1)
 
-        #import pdb; pdb.set_trace()
-
         # Read next value for manipulated variable
-        data_recorder.params['tau_p1'] = m.tau.NEWVAL
+        data_recorder.params['tau_p1'] = tau_p1
+        data_recorder.params['tau_p1_nn'] = tau_p1_nn
 
         # Save current model state to memory
         data_recorder.record_state()
 
         # Update dynamic model and simulate next time step
-        model.mvs['tau'] = m.tau.NEWVAL
+        model.mvs['tau'] = tau_p1   # or tau_p1_nn
         model.next_state()
 
         # Make sure segway has not tipped over!
