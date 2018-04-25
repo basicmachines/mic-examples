@@ -259,7 +259,7 @@ class GEKKO_MPC(GEKKO):
         # Setup model parameters
         self.mw = self.Param(name='mass_wheel', value=Mw)
         self.mr = self.Param(name='mass_robot', value=Mr)
-        self.L = self.Param(name='length_cm', value=L)
+        self.L = self.Param(name='length_m', value=L)
         self.R = self.Param(name='radius_wheel', value=R)
         self.g = self.Param(name='gravity', value=G)
         self.Iw = self.Param(name='Inertia_wheel', value=Iw)
@@ -453,7 +453,7 @@ def main():
     model = MobileInvertedPendulum(t=0.0, step_size=0.035)
 
     # Choose length of simulation (timesteps)
-    n_steps = 401
+    n_steps = 2401
 
     # Time horizon for predictive control
     horizon_steps = 10
@@ -612,7 +612,7 @@ def main():
         ax_y.plot(t[0:i], xr[0:i], '-', color='blue', label='xr')
         ax_y.legend(loc='best')
         ax_y.set_xlabel('Time (s)')
-        ax_y.set_ylabel('x position (cm)')
+        ax_y.set_ylabel('x position (m)')
 
         ax_anim.cla()
 
