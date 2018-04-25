@@ -172,7 +172,7 @@ class MobileInvertedPendulum(object):
 
 class DataRecorder(object):
 
-    def __init__(self, model, n_steps, params=None, filename=None):
+    def __init__(self, model, n, params=None, filename=None):
 
         self.model = model
 
@@ -180,7 +180,7 @@ class DataRecorder(object):
             params = {}
         self.params = params
 
-        self.n_steps = n_steps
+        self.n = n
         self.filename = filename
 
         self.columns = ['t'] + \
@@ -188,7 +188,7 @@ class DataRecorder(object):
                        sorted(list(model.mvs.keys())) + \
                        sorted(list(self.params.keys()))
 
-        self.data = pd.DataFrame(index=range(n_steps), columns=self.columns,
+        self.data = pd.DataFrame(index=range(n), columns=self.columns,
                                  dtype=float)
         self.current_row = 0
 
@@ -473,7 +473,7 @@ def main():
     # file with an extra column for the set points
     params = {'xr_sp': 0.0, 'θr_sp': 0.0, 'tau_p1': model.mvs['tau'],
               'tau_p1_nn': model.mvs['tau']}
-    data_recorder = DataRecorder(model, n_steps=n_steps, params=params)
+    data_recorder = DataRecorder(model, n=n_steps+1, params=params)
 
     '''
     Run simulation, looping over all t[].
