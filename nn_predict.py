@@ -78,9 +78,6 @@ def next_tau(tau, θw, θw_dot, θr, θr_dot, xr_sp):
 
     x = tau, θw, θw_dot, θr, θr_dot, xr_sp
 
-    # Normalize input values
-    x_norm = (x - net.mu)/net.sigma
-
     tau_p1 = net.predict(x)[0,0]
 
     return tau_p1
