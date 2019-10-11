@@ -453,7 +453,7 @@ def main():
     model = MobileInvertedPendulum(t=0.0, step_size=0.035)
 
     # Choose length of simulation (timesteps)
-    n_steps = 2401
+    n_steps = 401
 
     # Time horizon for predictive control
     horizon_steps = 10
@@ -488,7 +488,7 @@ def main():
                 else -0.5 if t < 8
                 else 0.5)
 
-    def random_setpoint_generator(mu=0.0, sigma=0.5, n=40, init=None):
+    def random_setpoint_generator(mu=0.1, sigma=0.25, n=30, init=None):
 
         if init is not None:
             current_value = init
@@ -502,7 +502,7 @@ def main():
 
     # Initialize random_setpoint_generator
     # Set init=0.0 to make it start at 0
-    xr_sp_random = random_setpoint_generator(mu=0.0, sigma=0.35, n=30)
+    xr_sp_random = random_setpoint_generator(mu=0.0, sigma=0.40, n=100)
 
     fig = plt.figure(figsize=(14, 9))
     gs = GridSpec(3, 3)
